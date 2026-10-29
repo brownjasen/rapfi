@@ -1,0 +1,91 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    name: Build Linux (${{ matrix.isa }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - isa: sse
+            cmake_flags: "-DUSE_SSE=ON"
+            output_name: rapfi-linux-x64-sse
+          - isa: avx2
+            cmake_flags: "-DUSE_AVX2=ON -DUSE_SSE=ON"
+            output_name: rapfi-linux-x64-avx2
+          - isa: avx512
+            cmake_flags: "-DUSE_AVX512=ON -DUSE_AVX2=ON -DUSE_SSE=ON -DUSE_BMI2=ON"
+            output_name: rapfi-linux-x64-avx512
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DENABLE_LTO=ON \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++" \
+            ${{ matrix.cmake_flags }}
+
+      - name: Compile
+        run: cmake --build build -j$(nproc)
+
+      - name: Package Linux Binary
+        run: |
+          mkdir -p dist
+          cp build/rapfi dist/${{ matrix.output_name }}
+          chmod +x dist/${{ matrix.output_name }}
+          tar -czvf ${{ matrix.output_name }}.tar.gz -C dist ${{ matrix.output_name }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output_name }}
+          path: ${{ matrix.output_name }}.tar.gz
+
+  create-release:
+    name: Publish GitHub Release
+    needs: build-linux
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Determine Release Tag
+        id: release_tag
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=v0.44.1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          name: Release ${{ steps.release_tag.outputs.tag }}
+          files: release-assets/*.tar.gz
+          generate_release_notes: true
